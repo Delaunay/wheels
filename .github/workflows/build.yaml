@@ -162,19 +162,40 @@ jobs:
         with:
           arch: x64
 
-      - name: Remove Git's link.exe from PATH (conflicts with MSVC linker)
+      - name: Disable Git's link.exe (shadows MSVC's linker under shell:bash)
         if: ${{ steps.check.outputs.skip != 'true' }}
         shell: pwsh
         run: |
-          # Git for Windows ships its own usr/bin/link.exe (a Unix hardlink
-          # tool, unrelated to MSVC's linker). If Git's usr/bin or bin dirs
-          # come ahead of MSVC's linker path, the build system shells out to
-          # Git's link.exe instead of MSVC's, which fails on MSVC-style flags
-          # like /LTCG with "extra operand '/LTCG'". Strip those entries here.
-          $filtered = ($env:PATH -split ';' | Where-Object {
-            $_ -notlike '*\Git\usr\bin*' -and $_ -notlike '*\Git\bin*'
-          }) -join ';'
-          Add-Content -Path $env:GITHUB_ENV -Value "PATH=$filtered"
+          # ilammy/msvc-dev-cmd's own README documents this exact conflict:
+          # GitHub Actions unconditionally re-prepends Git for Windows' GNU
+          # paths (usr/bin, bin) at the start of EVERY bash step, on top of
+          # whatever msvc-dev-cmd set up - so any PATH reordering we do gets
+          # silently undone on the very next step. Git's usr/bin/link.exe (a
+          # Unix hardlink tool) then gets picked up instead of MSVC's actual
+          # linker, which fails on MSVC flags like /LTCG with
+          # "extra operand '/LTCG'".
+          #
+          # The maintainer's own recommended fix is to remove the conflicting
+          # binary rather than fight PATH ordering. We rename it instead of
+          # deleting, in case anything on the runner legitimately needs it.
+          foreach ($p in @(
+            "C:\Program Files\Git\usr\bin\link.exe",
+            "C:\Program Files\Git\bin\link.exe"
+          )) {
+            if (Test-Path $p) {
+              Rename-Item $p "$p.disabled-by-workflow" -Force
+              Write-Host "Renamed $p to prevent shadowing MSVC's link.exe"
+            }
+          }
+
+      - name: Verify link.exe resolves to MSVC, not Git
+        if: ${{ steps.check.outputs.skip != 'true' }}
+        run: |
+          LINK_PATH=$(command -v link)
+          echo "Resolved link.exe: $LINK_PATH"
+          case "$LINK_PATH" in
+            *Git*) echo "::error::link.exe still resolves to Git's version: $LINK_PATH" && exit 1 ;;
+          esac
 
       - name: Set build environment
         if: ${{ steps.check.outputs.skip != 'true' }}
