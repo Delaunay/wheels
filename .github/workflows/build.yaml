@@ -27,10 +27,10 @@ on:
   workflow_dispatch:
     inputs:
       pytorch3d-ref:
-        description: "PyTorch3D git ref to build (branch, tag, or commit)"
+        description: "PyTorch3D git ref to build (release tag, branch, or commit). Default is v0.7.9, the latest tagged release."
         required: true
         type: string
-        default: "main"
+        default: "v0.7.9"
       python-version:
         description: "Python version"
         required: true
@@ -233,15 +233,38 @@ jobs:
           mkdir -p ../wheels
           pip wheel . --no-deps -w ../wheels
 
-      - name: Rename wheel to include CUDA tag
+      - name: Rename wheel to embed CUDA tag as local version
         if: ${{ steps.cudashort.outputs.skip_leg != 'true' && steps.check.outputs.skip != 'true' }}
         run: |
-          cd wheels
-          for f in pytorch3d-*.whl; do
-            newname=$(echo "$f" | sed "s/\(pytorch3d-[^-]*\)-/\1+${CUDA_SHORT}-/")
-            mv "$f" "$newname"
-          done
-          ls -la
+          python - <<'PY'
+          import glob, os
+
+          cuda_short = os.environ["CUDA_SHORT"]
+
+          for path in glob.glob("wheels/pytorch3d-*.whl"):
+              stem = os.path.basename(path)[:-4]  # strip ".whl"
+              parts = stem.split("-")
+              # Standard wheel filename spec:
+              # {distribution}-{version}(-{build tag})?-{python tag}-{abi tag}-{platform tag}.whl
+              if len(parts) == 5:
+                  dist, version, pytag, abitag, plat = parts
+              elif len(parts) == 6:
+                  dist, version, build, pytag, abitag, plat = parts
+                  pytag = f"{build}-{pytag}"  # keep build tag glued back on below
+              elif len(parts) == 4:
+                  # No version segment present at all - don't assume one, just tag what's there
+                  dist, pytag, abitag, plat = parts
+                  version = "0"
+              else:
+                  raise SystemExit(f"Unrecognized wheel filename, leaving as-is: {path}")
+
+              new_version = f"{version}+{cuda_short}"
+              new_name = f"{dist}-{new_version}-{pytag}-{abitag}-{plat}.whl"
+              new_path = os.path.join("wheels", new_name)
+              os.rename(path, new_path)
+              print(f"{path} -> {new_path}")
+          PY
+          ls -la wheels/
 
       - name: Upload build artifact
         if: ${{ steps.cudashort.outputs.skip_leg != 'true' && steps.check.outputs.skip != 'true' }}
