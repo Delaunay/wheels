@@ -61,10 +61,10 @@ on:
           - nightly
         default: stable
       torch-cuda-arch-list:
-        description: "CUDA architectures to target (semicolon-separated)"
+        description: "CUDA architectures to target (semicolon-separated). Default covers RTX 2080 Super (Turing, 7.5) and RTX 3080 (Ampere, 8.6) only."
         required: true
         type: string
-        default: "7.5;8.0;8.6;8.9;9.0;10.0;12.0"
+        default: "7.5;8.6"
       runs-on:
         description: "Windows runner label"
         required: true
@@ -77,10 +77,6 @@ on:
         default: "bash ../pulsar_patch.sh"
       upload-to-release:
         description: "Upload built wheels to a GitHub release"
-        type: boolean
-        default: true
-      enable-sccache:
-        description: "Cache cl.exe/nvcc compilation output via sccache across runs (dramatically speeds up rebuilds after the first one)"
         type: boolean
         default: true
       override-previous:
@@ -204,78 +200,6 @@ jobs:
             *Git*) echo "::error::link.exe still resolves to Git's version: $LINK_PATH" && exit 1 ;;
           esac
 
-      - name: Install sccache
-        if: ${{ steps.check.outputs.skip != 'true' && inputs.enable-sccache }}
-        shell: pwsh
-        run: |
-          $ver = "0.8.2"
-          $url = "https://github.com/mozilla/sccache/releases/download/v$ver/sccache-v$ver-x86_64-pc-windows-msvc.tar.gz"
-          Invoke-WebRequest -Uri $url -OutFile sccache.tar.gz
-          tar -xzf sccache.tar.gz
-          $dir = "sccache-v$ver-x86_64-pc-windows-msvc"
-          $dest = "$env:RUNNER_TEMP\sccache-bin"
-          New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          Copy-Item "$dir\sccache.exe" "$dest\sccache.exe"
-          Add-Content -Path $env:GITHUB_PATH -Value $dest
-          Add-Content -Path $env:GITHUB_ENV -Value "SCCACHE_DIR=$env:RUNNER_TEMP\sccache-cache"
-          Add-Content -Path $env:GITHUB_ENV -Value "SCCACHE_CACHE_SIZE=2G"
-
-      - name: Restore sccache cache
-        if: ${{ steps.check.outputs.skip != 'true' && inputs.enable-sccache }}
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}\sccache-cache
-          # Deliberately excludes pytorch3d-ref from the key: object-level
-          # compiler cache entries are keyed by sccache on source content and
-          # compiler flags, not on which git ref triggered the build, so
-          # entries stay reusable across pytorch3d version bumps as long as
-          # the underlying .cu/.cpp files and flags haven't changed.
-          key: sccache-windows-torch${{ matrix.torch-version }}-${{ env.CUDA_SHORT }}-${{ inputs.torch-cuda-arch-list }}
-          restore-keys: |
-            sccache-windows-torch${{ matrix.torch-version }}-${{ env.CUDA_SHORT }}-
-            sccache-windows-${{ env.CUDA_SHORT }}-
-
-      - name: Wrap cl.exe and nvcc.exe with sccache
-        if: ${{ steps.check.outputs.skip != 'true' && inputs.enable-sccache }}
-        shell: pwsh
-        run: |
-          # PyTorch3D's build (via torch.utils.cpp_extension, no CMake) has
-          # no built-in "compiler launcher" hook, so there's nowhere to
-          # plug sccache in cleanly. Instead we use the same binary-swap
-          # trick sccache's own docs recommend for such build systems: move
-          # the real compiler aside and drop a wrapper in its place.
-          #
-          # This works for BOTH invocation styles seen in the build log:
-          #   - cl.exe is invoked as bare "cl" (resolved via PATH)
-          #   - nvcc is invoked via a hardcoded absolute path with no
-          #     extension (Windows resolves the extension via PATHEXT the
-          #     same way whether the directory portion is bare or absolute)
-          # so a same-named wrapper script one PATHEXT-step below .exe
-          # (i.e. .cmd) gets picked up transparently either way, once the
-          # original .exe is out of the way.
-          function Install-SccacheWrapper($binDir, $exeName) {
-            $real = Join-Path $binDir "$exeName.exe"
-            $renamed = Join-Path $binDir "$exeName-real.exe"
-            if (-not (Test-Path $real)) {
-              throw "Expected $real to exist - cannot wrap with sccache"
-            }
-            if (-not (Test-Path $renamed)) {
-              Rename-Item $real $renamed
-            }
-            $wrapper = Join-Path $binDir "$exeName.cmd"
-            Set-Content -Path $wrapper -Value "@echo off`r`nsccache `"$renamed`" %*" -Encoding ASCII
-            Write-Host "Wrapped $exeName via $wrapper -> sccache -> $renamed"
-          }
-
-          $clDir = Join-Path $env:VCToolsInstallDir "bin\Hostx64\x64"
-          Install-SccacheWrapper $clDir "cl"
-
-          $nvccDir = Join-Path $env:CUDA_PATH "bin"
-          Install-SccacheWrapper $nvccDir "nvcc"
-
-          sccache --start-server
-          sccache --show-stats
-
       - name: Set build environment
         if: ${{ steps.check.outputs.skip != 'true' }}
         run: |
@@ -329,10 +253,6 @@ jobs:
           # --no-build-isolation is required: setup.py imports torch at build
           # time, and an isolated build env would not have torch installed.
           pip wheel . --no-deps --no-build-isolation -w ../wheels
-
-      - name: Show sccache stats
-        if: ${{ steps.check.outputs.skip != 'true' && inputs.enable-sccache }}
-        run: sccache --show-stats
 
       - name: Rename wheel to embed CUDA tag as local version
         if: ${{ steps.check.outputs.skip != 'true' }}
