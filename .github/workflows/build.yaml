@@ -74,7 +74,7 @@ on:
         description: "Shell command run inside the pytorch3d checkout before building. Defaults to this repo's known-issue patch script. Leave blank to skip patching entirely."
         required: false
         type: string
-        default: "bash ../patches/pulsar_patch.sh"
+        default: "bash ../pulsar_patch.sh"
       upload-to-release:
         description: "Upload built wheels to a GitHub release"
         type: boolean
