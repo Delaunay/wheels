@@ -162,6 +162,20 @@ jobs:
         with:
           arch: x64
 
+      - name: Remove Git's link.exe from PATH (conflicts with MSVC linker)
+        if: ${{ steps.check.outputs.skip != 'true' }}
+        shell: pwsh
+        run: |
+          # Git for Windows ships its own usr/bin/link.exe (a Unix hardlink
+          # tool, unrelated to MSVC's linker). If Git's usr/bin or bin dirs
+          # come ahead of MSVC's linker path, the build system shells out to
+          # Git's link.exe instead of MSVC's, which fails on MSVC-style flags
+          # like /LTCG with "extra operand '/LTCG'". Strip those entries here.
+          $filtered = ($env:PATH -split ';' | Where-Object {
+            $_ -notlike '*\Git\usr\bin*' -and $_ -notlike '*\Git\bin*'
+          }) -join ';'
+          Add-Content -Path $env:GITHUB_ENV -Value "PATH=$filtered"
+
       - name: Set build environment
         if: ${{ steps.check.outputs.skip != 'true' }}
         run: |
@@ -170,6 +184,13 @@ jobs:
           echo "TORCH_CUDA_ARCH_LIST=${{ inputs.torch-cuda-arch-list }}" >> "$GITHUB_ENV"
           echo "MAX_JOBS=4" >> "$GITHUB_ENV"
           echo "CUDA_PATH=${{ steps.cuda-toolkit.outputs.CUDA_PATH }}" >> "$GITHUB_ENV"
+          # CUDA 13.x's CCCL headers add a hard compile-time check that fails
+          # (fatal error C1189) unless MSVC's traditional preprocessor warning
+          # is explicitly acknowledged. pytorch3d's setup.py doesn't pass this
+          # flag itself (predates CUDA 13), so we inject it globally via the
+          # NVCC_APPEND_FLAGS env var, which nvcc appends to every invocation
+          # regardless of what the calling build system passes.
+          echo "NVCC_APPEND_FLAGS=-DCCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING" >> "$GITHUB_ENV"
 
       - name: Install PyTorch (${{ inputs.torch-channel }}, ${{ env.CUDA_SHORT }})
         if: ${{ steps.check.outputs.skip != 'true' }}
