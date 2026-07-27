@@ -71,10 +71,10 @@ on:
         type: string
         default: "windows-2022"
       patch-command:
-        description: "Optional shell command run inside the pytorch3d checkout before building (e.g. to sed-patch a source file). Leave blank to skip."
+        description: "Shell command run inside the pytorch3d checkout before building. Defaults to this repo's known-issue patch script. Leave blank to skip patching entirely."
         required: false
         type: string
-        default: ""
+        default: "bash ../patches/pulsar_patch.sh"
       upload-to-release:
         description: "Upload built wheels to a GitHub release"
         type: boolean
@@ -100,6 +100,9 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     name: Build pytorch3d (torch ${{ matrix.torch-version }}, CUDA ${{ matrix.cuda-version }})
     steps:
+      - name: Check out this repo (for patches/ etc.)
+        uses: actions/checkout@v4
+
       - name: Resolve CUDA short tag and release tag for this leg
         id: resolve
         run: |
