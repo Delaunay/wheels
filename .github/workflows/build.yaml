@@ -1,27 +1,33 @@
 name: Build PyTorch3D Wheels (Windows)
 
-# Builds PyTorch3D wheels for Windows against CUDA 13.0.x and CUDA 13.2.x,
-# for a PyTorch version you specify.
+# Builds PyTorch3D wheels for Windows across a full matrix of PyTorch
+# versions x CUDA versions that you supply as JSON lists. One GitHub
+# release is created/reused PER (pytorch version, cuda version) combo,
+# since that's the meaningful unit of compatibility here - the pytorch3d
+# package version itself is already embedded in the wheel filename
+# (setup.py reads it from pytorch3d/__init__.py), so it doesn't need to
+# be part of the release tag.
 #
 # IMPORTANT CAVEATS (read before running):
 # 1. PyTorch3D's official INSTALL.md only lists support up to PyTorch 2.4.1
-#    and does not mention CUDA 13 at all, so building 2.13.0+cu130 (or any
-#    cu13x build) is untested territory as far as upstream is concerned —
-#    it may just work, or it may need patching (see caveat 3).
-# 2. torch-version-cu130 and torch-version-cu132 are separate inputs, each
-#    installed against its matching index (cu130 wheel index for the CUDA
-#    13.0 leg, cu132 for the CUDA 13.2 leg). Leave torch-version-cu132 blank
-#    to build only the cu130 wheel — that leg is skipped entirely rather
-#    than failing.
-# 3. PyTorch3D's setup.py sometimes needs small source patches to build
+#    and does not mention CUDA 13 at all, so building against CUDA 13.x is
+#    untested territory as far as upstream is concerned - it may just
+#    work, or it may need patching (see caveat 2).
+# 2. PyTorch3D's setup.py sometimes needs small source patches to build
 #    against newer PyTorch/CUDA combinations (the upstream INSTALL.md notes
 #    this too: "changes to some PyTorch headers may be needed"). This
-#    workflow does NOT attempt to auto-patch anything — if the build fails
+#    workflow does NOT attempt to auto-patch anything - if the build fails
 #    with a compile error, that's the next thing to look at, and the
 #    "patch-command" input below is provided as a hook for exactly this.
-# 4. Windows GitHub-hosted runners come with VS2022 preinstalled; this
+# 3. Windows GitHub-hosted runners come with VS2022 preinstalled; this
 #    workflow just activates the x64 dev environment on top of it rather
 #    than installing Build Tools from scratch.
+# 4. The build uses `pip wheel --no-build-isolation`, because PyTorch3D's
+#    setup.py imports torch directly at build time. Build isolation would
+#    create a clean venv without torch installed and the build would fail
+#    with "ModuleNotFoundError: No module named 'torch'". This means torch
+#    must already be installed in the runner's environment before the
+#    wheel step runs, which the "Install PyTorch" step handles.
 
 on:
   workflow_dispatch:
@@ -36,18 +42,18 @@ on:
         required: true
         type: string
         default: "3.12"
-      torch-version-cu130:
-        description: "PyTorch version to build against for the CUDA 13.0 leg, including local version suffix (e.g. 2.13.0+cu130)"
+      torch-versions:
+        description: "JSON list of PyTorch versions to build against"
         required: true
         type: string
-        default: "2.13.0+cu130"
-      torch-version-cu132:
-        description: "PyTorch version to build against for the CUDA 13.2 leg, including local version suffix (e.g. 2.13.0+cu132). Leave blank to skip the cu132 build entirely."
-        required: false
+        default: '["2.13.0"]'
+      cuda-versions:
+        description: "JSON list of CUDA toolkit versions to build against"
+        required: true
         type: string
-        default: ""
+        default: '["13.0.0", "13.2.0"]'
       torch-channel:
-        description: "Which PyTorch wheel index to install from (applies to both legs)"
+        description: "Which PyTorch wheel index to install from"
         required: true
         type: choice
         options:
@@ -77,105 +83,73 @@ on:
         description: "Overwrite existing release assets with the same name"
         type: boolean
         default: false
-      release-tag:
-        description: "Release tag (leave empty for auto: pytorch3d-torch{X.Y}-cu{MAJMIN})"
-        type: string
-        default: ""
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  create-release:
-    name: Create release
-    if: ${{ inputs.upload-to-release }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    outputs:
-      tag: ${{ steps.tag.outputs.tag }}
-    steps:
-      - name: Compute release tag
-        id: tag
-        run: |
-          TAG="${{ inputs.release-tag }}"
-          if [ -z "$TAG" ]; then
-            TORCH_MAJOR=$(echo "${{ inputs.torch-version-cu130 }}" | cut -d. -f1)
-            TORCH_MINOR=$(echo "${{ inputs.torch-version-cu130 }}" | cut -d. -f2)
-            TAG="pytorch3d-torch${TORCH_MAJOR}.${TORCH_MINOR}"
-          fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Create release (if it does not exist)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "${{ steps.tag.outputs.tag }}" \
-            --title "${{ steps.tag.outputs.tag }}" \
-            --notes "PyTorch3D Windows wheels — cu130: ${{ inputs.torch-version-cu130 }}, cu132: ${{ inputs.torch-version-cu132 || 'skipped' }}" \
-            --repo "${{ github.repository }}" \
-            2>/dev/null || true
-
   build-pytorch3d:
-    needs: [create-release]
-    if: ${{ !cancelled() }}
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
-        cuda-version: ["13.0.0", "13.2.0"]
+        cuda-version: ${{ fromJson(inputs.cuda-versions) }}
+        torch-version: ${{ fromJson(inputs.torch-versions) }}
     runs-on: ${{ inputs.runs-on }}
-    name: Build pytorch3d (CUDA ${{ matrix.cuda-version }})
+    name: Build pytorch3d (torch ${{ matrix.torch-version }}, CUDA ${{ matrix.cuda-version }})
     steps:
-      - name: Resolve CUDA short tag and torch version for this leg
-        id: cudashort
+      - name: Resolve CUDA short tag and release tag for this leg
+        id: resolve
         run: |
           CUDA_MAJOR=$(echo "${{ matrix.cuda-version }}" | cut -d. -f1)
           CUDA_MINOR=$(echo "${{ matrix.cuda-version }}" | cut -d. -f2)
           CUDA_SHORT="cu${CUDA_MAJOR}${CUDA_MINOR}"
           echo "CUDA_SHORT=$CUDA_SHORT" >> "$GITHUB_ENV"
 
-          if [ "$CUDA_SHORT" = "cu130" ]; then
-            TORCH_VERSION="${{ inputs.torch-version-cu130 }}"
-          elif [ "$CUDA_SHORT" = "cu132" ]; then
-            TORCH_VERSION="${{ inputs.torch-version-cu132 }}"
-          fi
+          TORCH_MAJOR=$(echo "${{ matrix.torch-version }}" | cut -d. -f1)
+          TORCH_MINOR=$(echo "${{ matrix.torch-version }}" | cut -d. -f2)
+          TAG="pytorch3d-torch${TORCH_MAJOR}.${TORCH_MINOR}-${CUDA_SHORT}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-          if [ -z "$TORCH_VERSION" ]; then
-            echo "::notice::No torch-version supplied for $CUDA_SHORT, skipping this leg entirely"
-            echo "skip_leg=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "TORCH_VERSION=$TORCH_VERSION" >> "$GITHUB_ENV"
-          fi
-
-      - name: Check if wheel already exists
-        id: check
-        if: ${{ steps.cudashort.outputs.skip_leg != 'true' && inputs.upload-to-release && !inputs.override-previous }}
+      - name: Create release for this leg (if it does not exist)
+        if: ${{ inputs.upload-to-release }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ASSETS=$(gh release view "${{ needs.create-release.outputs.tag }}" --repo "${{ github.repository }}" --json assets -q '.assets[].name' 2>/dev/null || echo "")
-          if echo "$ASSETS" | grep -q "^pytorch3d-.*${CUDA_SHORT}.*win_amd64"; then
+          gh release create "${{ steps.resolve.outputs.tag }}" \
+            --title "${{ steps.resolve.outputs.tag }}" \
+            --notes "PyTorch3D Windows wheels for PyTorch ${{ matrix.torch-version }} + CUDA ${{ matrix.cuda-version }}" \
+            --repo "${{ github.repository }}" \
+            2>/dev/null || true
+
+      - name: Check if wheel already exists
+        id: check
+        if: ${{ inputs.upload-to-release && !inputs.override-previous }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ASSETS=$(gh release view "${{ steps.resolve.outputs.tag }}" --repo "${{ github.repository }}" --json assets -q '.assets[].name' 2>/dev/null || echo "")
+          if echo "$ASSETS" | grep -q "^pytorch3d-.*win_amd64"; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::pytorch3d wheel for $CUDA_SHORT already exists in release, skipping build"
+            echo "::notice::pytorch3d wheel already exists in release ${{ steps.resolve.outputs.tag }}, skipping build"
           fi
 
       - name: Set up Python
-        if: ${{ steps.cudashort.outputs.skip_leg != 'true' && steps.check.outputs.skip != 'true' }}
+        if: ${{ steps.check.outputs.skip != 'true' }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python-version }}
 
       - name: Enable long paths (helps with deep MSVC/CUDA include trees)
-        if: ${{ steps.cudashort.outputs.skip_leg != 'true' && steps.check.outputs.skip != 'true' }}
+        if: ${{ steps.check.outputs.skip != 'true' }}
         shell: pwsh
         run: |
           git config --system core.longpaths true
 
       - name: Install CUDA ${{ matrix.cuda-version }}
-        if: ${{ steps.cudashort.outputs.skip_leg != 'true' && steps.check.outputs.skip != 'true' }}
+        if: ${{ steps.check.outputs.skip != 'true' }}
         uses: Jimver/cuda-toolkit@v0.2.35
         id: cuda-toolkit
         with:
@@ -183,13 +157,13 @@ jobs:
           method: "local"
 
       - name: Set up MSVC x64 dev environment
-        if: ${{ steps.cudashort.outputs.skip_leg != 'true' && steps.check.outputs.skip != 'true' }}
+        if: ${{ steps.check.outputs.skip != 'true' }}
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
       - name: Set build environment
-        if: ${{ steps.cudashort.outputs.skip_leg != 'true' && steps.check.outputs.skip != 'true' }}
+        if: ${{ steps.check.outputs.skip != 'true' }}
         run: |
           echo "FORCE_CUDA=1" >> "$GITHUB_ENV"
           echo "DISTUTILS_USE_SDK=1" >> "$GITHUB_ENV"
@@ -198,7 +172,7 @@ jobs:
           echo "CUDA_PATH=${{ steps.cuda-toolkit.outputs.CUDA_PATH }}" >> "$GITHUB_ENV"
 
       - name: Install PyTorch (${{ inputs.torch-channel }}, ${{ env.CUDA_SHORT }})
-        if: ${{ steps.cudashort.outputs.skip_leg != 'true' && steps.check.outputs.skip != 'true' }}
+        if: ${{ steps.check.outputs.skip != 'true' }}
         run: |
           python -m pip install --upgrade pip
           if [ "${{ inputs.torch-channel }}" = "nightly" ]; then
@@ -207,34 +181,36 @@ jobs:
             INDEX_URL="https://download.pytorch.org/whl/${CUDA_SHORT}"
           fi
           echo "Using index: $INDEX_URL"
-          pip install --no-cache-dir "torch==${TORCH_VERSION}" --index-url "$INDEX_URL"
+          pip install --no-cache-dir "torch==${{ matrix.torch-version }}" --index-url "$INDEX_URL"
 
       - name: Install build dependencies
-        if: ${{ steps.cudashort.outputs.skip_leg != 'true' && steps.check.outputs.skip != 'true' }}
+        if: ${{ steps.check.outputs.skip != 'true' }}
         run: |
           pip install ninja iopath fvcore wheel setuptools
 
       - name: Checkout PyTorch3D
-        if: ${{ steps.cudashort.outputs.skip_leg != 'true' && steps.check.outputs.skip != 'true' }}
+        if: ${{ steps.check.outputs.skip != 'true' }}
         run: |
           git clone --depth 1 --branch "${{ inputs.pytorch3d-ref }}" https://github.com/facebookresearch/pytorch3d.git || \
           (git clone https://github.com/facebookresearch/pytorch3d.git && cd pytorch3d && git checkout "${{ inputs.pytorch3d-ref }}")
 
       - name: Apply optional patch command
-        if: ${{ steps.cudashort.outputs.skip_leg != 'true' && steps.check.outputs.skip != 'true' && inputs.patch-command != '' }}
+        if: ${{ steps.check.outputs.skip != 'true' && inputs.patch-command != '' }}
         working-directory: pytorch3d
         run: ${{ inputs.patch-command }}
 
       - name: Build wheel
-        if: ${{ steps.cudashort.outputs.skip_leg != 'true' && steps.check.outputs.skip != 'true' }}
+        if: ${{ steps.check.outputs.skip != 'true' }}
         working-directory: pytorch3d
         run: |
           python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
           mkdir -p ../wheels
-          pip wheel . --no-deps -w ../wheels
+          # --no-build-isolation is required: setup.py imports torch at build
+          # time, and an isolated build env would not have torch installed.
+          pip wheel . --no-deps --no-build-isolation -w ../wheels
 
       - name: Rename wheel to embed CUDA tag as local version
-        if: ${{ steps.cudashort.outputs.skip_leg != 'true' && steps.check.outputs.skip != 'true' }}
+        if: ${{ steps.check.outputs.skip != 'true' }}
         run: |
           python - <<'PY'
           import glob, os
@@ -250,9 +226,8 @@ jobs:
                   dist, version, pytag, abitag, plat = parts
               elif len(parts) == 6:
                   dist, version, build, pytag, abitag, plat = parts
-                  pytag = f"{build}-{pytag}"  # keep build tag glued back on below
+                  pytag = f"{build}-{pytag}"
               elif len(parts) == 4:
-                  # No version segment present at all - don't assume one, just tag what's there
                   dist, pytag, abitag, plat = parts
                   version = "0"
               else:
@@ -267,14 +242,14 @@ jobs:
           ls -la wheels/
 
       - name: Upload build artifact
-        if: ${{ steps.cudashort.outputs.skip_leg != 'true' && steps.check.outputs.skip != 'true' }}
+        if: ${{ steps.check.outputs.skip != 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: pytorch3d-windows-${{ env.CUDA_SHORT }}
+          name: pytorch3d-windows-torch${{ matrix.torch-version }}-${{ env.CUDA_SHORT }}
           path: wheels/*.whl
 
       - name: Upload wheel to release
-        if: ${{ steps.cudashort.outputs.skip_leg != 'true' && steps.check.outputs.skip != 'true' && inputs.upload-to-release }}
+        if: ${{ steps.check.outputs.skip != 'true' && inputs.upload-to-release }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -282,7 +257,7 @@ jobs:
           if [ "${{ inputs.override-previous }}" = "true" ]; then
             CLOBBER_FLAG="--clobber"
           fi
-          gh release upload "${{ needs.create-release.outputs.tag }}" wheels/*.whl $CLOBBER_FLAG --repo "${{ github.repository }}" 2>&1 | tee /tmp/upload.log || {
+          gh release upload "${{ steps.resolve.outputs.tag }}" wheels/*.whl $CLOBBER_FLAG --repo "${{ github.repository }}" 2>&1 | tee /tmp/upload.log || {
             if grep -q "already exists" /tmp/upload.log; then
               echo "::warning::Wheel already exists in release, skipping upload"
             else
